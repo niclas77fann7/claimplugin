@@ -4,8 +4,10 @@ claimthread — a Modmail plugin.
 Adds `?claim` / `?unclaim` to Modmail threads:
 
   * `?claim`   assigns the thread to you, renames the channel to put your
-               name on it, and pings you whenever the recipient sends a
-               new message in this thread from then on.
+               name on it, and pings you (with the `:Jet2Message:` custom
+               emoji) whenever the recipient sends a new message in this
+               thread from then on — the mention is added directly onto
+               Modmail's own relay message, not sent as a separate message.
   * `?unclaim` releases the claim and restores the original channel name.
 
 The claim is stored in the bot's own database (via `bot.plugin_db`), so it
@@ -156,7 +158,12 @@ class ClaimThread(commands.Cog):
 
     @commands.Cog.listener()
     async def on_thread_reply(self, thread, from_mod, message, anonymous, plain):
-        """Ping the claimer whenever the recipient sends a new message."""
+        """Ping the claimer whenever the recipient sends a new message.
+
+        This edits the mention straight into the message Modmail itself just
+        posted for the recipient's message, instead of sending a separate
+        message underneath it.
+        """
         if from_mod:
             return  # only the recipient's own messages should ping the claimer
 
@@ -168,8 +175,37 @@ class ClaimThread(commands.Cog):
         if not existing:
             return
 
+        guild = self.bot.guild
+        emoji = discord.utils.get(guild.emojis, name="Jet2Message") if guild else None
+        emoji_str = str(emoji) if emoji else "\N{BELL}"
+        mention = f"<@{existing['user_id']}> {emoji_str}"
+
+        incoming_text = getattr(message, "content", "") or ""
+
+        # Find the message Modmail just relayed for this reply (posted by the
+        # bot itself, as an embed with no content yet) and add our mention to
+        # it directly, rather than sending a new message after it.
+        target = None
+        async for msg in channel.history(limit=5):
+            if not (msg.author.id == self.bot.user.id and msg.embeds and not msg.content):
+                continue
+            description = msg.embeds[0].description or ""
+            if incoming_text and incoming_text not in description:
+                continue
+            target = msg
+            break
+
+        if target is not None:
+            try:
+                await target.edit(content=mention)
+                return
+            except discord.HTTPException as e:
+                logger.warning("claimthread: failed to edit relay message in %s: %s", channel.id, e)
+
+        # Fallback (couldn't locate the relay message): send the ping on its own
+        # rather than silently dropping it.
         try:
-            await channel.send(f"<@{existing['user_id']}> \N{BELL} new message from {thread.recipient}.")
+            await channel.send(mention)
         except discord.HTTPException as e:
             logger.warning("claimthread: failed to send ping in %s: %s", channel.id, e)
 
